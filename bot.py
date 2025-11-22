@@ -11,20 +11,24 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client
 
+# ================== ENV ==================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ================== LOGGING ==================
 logging.basicConfig(level=logging.INFO)
 
+# ================== BOT ==================
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 MAX_CODES_PER_PHONE = 10
 ADMIN_ID = 6191416030
 
+# ================== STATES ==================
 class RegisterStates(StatesGroup):
     waiting_name = State()
     waiting_surname = State()
@@ -64,8 +68,110 @@ def validate_code(code: str) -> bool:
 def calculate_chances(codes_count: int) -> int:
     return 1 if 1 <= codes_count <= 2 else 10 if 3 <= codes_count <= 9 else 100 if codes_count >= 10 else 0
 
-# ================== CONTACT & REGISTRATION (qisqartirilgan, ishlaydi) ==================
-# ... (oldingi handle_contact, start_handler, ism-familiya qismlari o‘zgarmadi)
+# ================== CONTACT HANDLER ==================
+@dp.message(F.contact)
+async def handle_contact(message: types.Message, state: FSMContext):
+    phone = re.sub(r'\D', '', message.contact.phone_number)
+    if not phone.startswith('998') or len(phone) != 12:
+        await message.answer("Telefon raqami noto'g'ri formatda!\nFaqat tugma orqali +998XXXXXXXXX formatida jo'nating:", reply_markup=get_phone_kb())
+        return
+    phone = '+' + phone
+    user_id = message.from_user.id
+    if supabase.table('users').select('id').eq('phone', phone).execute().data:
+        await message.answer("Bu telefon raqami allaqachon ro'yxatdan o'tgan.\nBoshqa raqam kiriting:", reply_markup=get_phone_kb())
+        return
+    await state.update_data(phone=phone)
+    await message.answer("Ismingizni kiriting:")
+    await state.set_state(RegisterStates.waiting_name)
+
+# ================== MANUAL PHONE REJECTION ==================
+@dp.message(F.text.regexp(r"^\+998[0-9]{9}$"))
+async def reject_manual_phone(message: types.Message):
+    current_state = await state.get_state()
+    if current_state is None or "waiting_name" not in current_state:
+        await message.answer("Telefon raqamini qo‘lda kiritmang!\nFaqat tugma orqali jo'nating:", reply_markup=get_phone_kb())
+
+# ================== /start (ENG BIRINCHI — HAR DOIM ISHLAYDI!) ==================
+@dp.message(Command("start"))
+async def start_handler(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text or ""
+    deep_link = re.search(r'/start\s+code_([A-Z0-9-]+)', text)
+    if deep_link:
+        code = deep_link.group(1).upper()
+        if validate_code(code):
+            await state.update_data(deep_code=code)
+
+    res = supabase.table('users').select('name, chances, phone').eq('user_id', user_id).execute()
+
+    if res.data:
+        user = res.data[0]
+        data = await state.get_data()
+        deep_code = data.get('deep_code')
+
+        if deep_code:
+            code_res = supabase.table('codes').select('assigned', 'user_id').eq('code', deep_code).execute()
+            if code_res.data and not code_res.data[0]['assigned']:
+                used_count = supabase.table('codes').select('id', count='exact').eq('assigned', True).eq('user_id', user_id).execute().count
+                if used_count < MAX_CODES_PER_PHONE:
+                    update_res = supabase.table('codes').update({'assigned': True, 'user_id': user_id, 'assigned_at': 'now()'}).eq('code', deep_code).execute()
+                    if update_res.data:
+                        total_codes = used_count + 1
+                        chances = calculate_chances(total_codes)
+                        supabase.table('users').update({'chances': chances, 'purchases': total_codes}).eq('user_id', user_id).execute()
+                        await message.answer(f"QR-kod orqali kod qabul qilindi!\n\nKod: `{deep_code}`\nJami: {total_codes} ta\nImkoniyat: {chances} ta", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+                        await state.clear()
+                        await state.set_state(RegisterStates.waiting_code)
+                        return
+                else:
+                    await message.answer("Maksimal 10 ta kod kiritildi!", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+            else:
+                await message.answer(f"Bu kod topilmadi yoki allaqachon ishlatilgan: {deep_code}", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+
+        await message.answer(f"Salom, {user['name']}!\n\nSizda {user['chances']} ta imkoniyat bor.\nYangi kod jo'nating yoki kodlaringizni ko'ring:", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+    else:
+        await message.answer("Assalomu alaykum!\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni tugma orqali jo‘nating.", reply_markup=get_phone_kb())
+    
+    await state.set_state(RegisterStates.waiting_code)
+
+# ================== ISM VA FAMILYA ==================
+@dp.message(RegisterStates.waiting_name)
+async def process_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text.strip())
+    await message.answer("Familyangizni kiriting:")
+    await state.set_state(RegisterStates.waiting_surname)
+
+@dp.message(RegisterStates.waiting_surname)
+async def process_surname(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = message.from_user.id
+    name = data['name']
+    surname = message.text.strip()
+    phone = data['phone']
+    deep_code = data.get('deep_code')
+
+    insert_res = supabase.table('users').insert({'user_id': user_id, 'name': name, 'surname': surname, 'phone': phone, 'chances': 0, 'purchases': 0}).execute()
+    if not insert_res.data:
+        await message.answer("Ro'yxatdan o'tishda xato. Qayta urining.")
+        return
+
+    if deep_code:
+        code_res = supabase.table('codes').select('assigned').eq('code', deep_code).execute()
+        if not code_res.data:
+            await message.answer(f"Ro‘yxatdan o‘tdingiz!\nIsmi: {name} {surname}\nTelefon: {phone}\n\nQR-kod topilmadi: `{deep_code}`", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+        elif code_res.data[0]['assigned']:
+            await message.answer(f"Ro‘yxatdan o‘tdingiz!\nIsmi: {name} {surname}\nTelefon: {phone}\n\nQR-kod allaqachon ishlatilgan: `{deep_code}`", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+        else:
+            update_res = supabase.table('codes').update({'assigned': True, 'user_id': user_id, 'assigned_at': 'now()'}).eq('code', deep_code).execute()
+            if update_res.data:
+                chances = calculate_chances(1)
+                supabase.table('users').update({'chances': chances, 'purchases': 1}).eq('user_id', user_id).execute()
+                await message.answer(f"Ro‘yxatdan o‘tdingiz!\nIsmi: {name} {surname}\nTelefon: {phone}\n\nQR-kod orqali kod qo‘shildi!\nKod: `{deep_code}`\nImkoniyat: {chances} ta", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+    else:
+        await message.answer(f"Ro‘yxatdan o‘tdingiz!\nIsmi: {name} {surname}\nTelefon: {phone}\n\nKod jo'natish uchun *Kod jo`natish* tugmasini bosing", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
+
+    await state.clear()
+    await state.set_state(RegisterStates.waiting_code)
 
 # ================== 1. KOD JO'NATISH ==================
 @dp.message(F.text == "Kod jo'natish")
@@ -74,7 +180,7 @@ async def ask_code(message: types.Message, state: FSMContext):
         return
     await message.answer("Kod jo'nating (masalan: `AR-9K2M4P`):", parse_mode="Markdown")
 
-# ================== 2. KODLARIM (TO‘G‘RILANGAN!) ==================
+# ================== 2. KODLARIM ==================
 @dp.message(F.text == "Kodlarim")
 async def my_codes(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
@@ -111,7 +217,7 @@ async def my_codes(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ================== 3. SAVOL BERISH (TO‘G‘RILANGAN!) ==================
+# ================== 3. SAVOL BERISH ==================
 @dp.message(F.text == "Savol berish")
 async def ask_question(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
@@ -132,9 +238,7 @@ async def receive_question(message: types.Message, state: FSMContext):
     )
 
     await message.answer("Rahmat! Savolingiz qabul qilindi. Tez orada javob beramiz!", reply_markup=get_admin_kb() if user.id == ADMIN_ID else get_code_kb())
-    
-    # MUHIM: waiting_code holatiga qaytish!
-    await state.set_state(RegisterStates.waiting_code)
+    await state.set_state(RegisterStates.waiting_code)  # MUHIM: tugmalar qayta ishlaydi!
 
 # ================== 4. ADMIN STATISTIKA ==================
 @dp.message(F.text == "Statistika")
@@ -162,6 +266,7 @@ async def process_code(message: types.Message, state: FSMContext):
     text = message.text.strip().upper()
     user_id = message.from_user.id
 
+    # Tugmalarni oldindan ushlab oldik
     if text in ["KOD JO'NATISH", "KODLARIM", "SAVOL BERISH", "STATISTIKA"]:
         return
 
@@ -174,7 +279,6 @@ async def process_code(message: types.Message, state: FSMContext):
         await message.answer("Kod noto‘g‘ri formatda. Masalan: `AR-9K2M4P`", parse_mode="Markdown")
         return
 
-    # Qolgan kod (oldingiday)
     user_res = supabase.table('users').select('id').eq('user_id', user_id).execute()
     if not user_res.data:
         await message.answer("Siz hali ro‘yxatdan o‘tmagansiz.")
@@ -209,8 +313,49 @@ async def process_code(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ================== BROADCAST & JAVOB BERISH (oldingiday) ==================
-# ... (oldingi broadcast va javob berish kodlari o‘zgarmadi)
+# ================== BROADCAST ==================
+@dp.message(RegisterStates.waiting_broadcast)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Sizda bu huquq yo'q.")
+        return
+    broadcast_text = message.text
+    users = supabase.table('users').select('user_id').execute().data
+    success = failed = 0
+    for user in users:
+        try:
+            await bot.send_message(user['user_id'], broadcast_text)
+            success += 1
+        except:
+            failed += 1
+        await asyncio.sleep(0.05)
+    await message.answer(f"Xabar yuborildi!\nMuvaffaqiyatli: {success}\nXato: {failed}")
+    await state.set_state(RegisterStates.waiting_code)
+
+# ================== JAVOB BERISH ==================
+@dp.callback_query(lambda c: c.data and c.data.startswith("answer_"))
+async def start_answer(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Sizda bu huquq yo‘q!", show_alert=True)
+        return
+    user_id = int(callback.data.split("_")[1])
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Javobingizni yozing:")
+    await state.set_state(RegisterStates.waiting_answer)
+    await state.update_data(target_user_id=user_id)
+
+@dp.message(RegisterStates.waiting_answer)
+async def send_answer(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+    try:
+        await bot.send_message(target_user_id, f"Javob:\n\n{message.text}")
+        await message.answer("Javob yuborildi!")
+    except Exception as e:
+        await message.answer(f"Javob yuborilmadi: {e}")
+    await state.clear()
 
 # ================== MAIN ==================
 async def main():
