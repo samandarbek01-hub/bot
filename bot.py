@@ -50,7 +50,7 @@ def get_phone_kb():
 def get_code_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyframeButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")],
+            [KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")],
             [KeyboardButton(text="Savol berish")]
         ],
         resize_keyboard=True
@@ -140,7 +140,7 @@ async def start_handler(message: types.Message, state: FSMContext):
                 await message.answer(f"Bu kod topilmadi yoki allaqachon ishlatilgan: {deep_code}", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
 
         await message.answer(f"Salom, {user['name']}!\n\nSizda {user['chances']} ta imkoniyat bor.\nYangi kod jo'nating yoki kodlaringizni ko'ring:", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
-        await state.set_state(RegisterStates.waiting_code)
+        await state.set_state(RegisterStates.waiting/tab_code)
     else:
         await message.answer("Assalomu alaykum!\n\n“Hid — bu faqat xotira emas, balki imkon.”\nAmeer atiri bilan orzularingni ro‘yobga chiqar!\n\nHar bir xarid — uy yutish imkoniyati!\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni tugma orqali jo‘nating.", reply_markup=get_phone_kb())
 
@@ -183,7 +183,7 @@ async def process_surname(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(RegisterStates.waiting_code)
 
-# ================== 1. KOD JO'NATISH (eng yuqori ustuvorlik!) ==================
+# ================== 1. KOD JO'NATISH ==================
 @dp.message(F.text == "Kod jo'natish")
 async def ask_code(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
@@ -246,7 +246,7 @@ async def receive_question(message: types.Message, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Javob berish", callback_data=f"answer_{user.id}")]])
     )
 
-    await message in message.answer("Rahmat! Savolingiz qabul qilindi. Tez orada javob beramiz!", reply_markup=get_admin_kb() if user.id == ADMIN_ID else get_code_kb())
+    await message.answer("Rahmat! Savolingiz qabul qilindi. Tez orada javob beramiz!", reply_markup=get_admin_kb() if user.id == ADMIN_ID else get_code_kb())
     await state.clear()
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("answer_"))
@@ -275,11 +275,11 @@ async def send_answer(message: types.Message, state: FSMContext):
 
 # ================== 4. KOD QAYTA ISHLOVCHI (EN OXIRGI!) ==================
 @dp.message(RegisterStates.waiting_code)
-async def process_code(message: types.Message, state: AFSMContext):
+async def process_code(message: types.Message, state: FSMContext):  # AFSMContext → FSMContext
     text = message.text.strip().upper()
     user_id = message.from_user.id
 
-    # Tugmalarni oldindan ushlab oldik — bu yerda faqat kod tekshiriladi
+    # Tugmalarni oldindan ushlab oldik
     if text in ["KOD JO'NATISH", "KODLARIM", "SAVOL BERISH"]:
         return
 
@@ -292,7 +292,7 @@ async def process_code(message: types.Message, state: AFSMContext):
         await message.answer("Kod noto‘g‘ri formatda. Masalan: `AR-9K2M4P`", parse_mode="Markdown")
         return
 
-    # Qolgan kod (oldingiday)
+    # Qolgan kod...
     user_res = supabase.table('users').select('id').eq('user_id', user_id).execute()
     if not user_res.data:
         await message.answer("Siz hali ro‘yxatdan o‘tmagansiz.")
