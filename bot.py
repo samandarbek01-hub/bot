@@ -140,7 +140,7 @@ async def start_handler(message: types.Message, state: FSMContext):
                 await message.answer(f"Bu kod topilmadi yoki allaqachon ishlatilgan: {deep_code}", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
 
         await message.answer(f"Salom, {user['name']}!\n\nSizda {user['chances']} ta imkoniyat bor.\nYangi kod jo'nating yoki kodlaringizni ko'ring:", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
-        await state.set_state(RegisterStates.waiting/tab_code)
+        await state.set_state(RegisterStates.waiting_code)
     else:
         await message.answer("Assalomu alaykum!\n\n“Hid — bu faqat xotira emas, balki imkon.”\nAmeer atiri bilan orzularingni ro‘yobga chiqar!\n\nHar bir xarid — uy yutish imkoniyati!\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni tugma orqali jo‘nating.", reply_markup=get_phone_kb())
 
@@ -192,7 +192,7 @@ async def ask_code(message: types.Message, state: FSMContext):
 
 # ================== 2. KODLARIM ==================
 @dp.message(F.text == "Kodlarim")
-async def my_codes(message: types.Message):
+async def my_codes(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
         return
     user_id = message.from_user.id
@@ -275,7 +275,7 @@ async def send_answer(message: types.Message, state: FSMContext):
 
 # ================== 4. KOD QAYTA ISHLOVCHI (EN OXIRGI!) ==================
 @dp.message(RegisterStates.waiting_code)
-async def process_code(message: types.Message, state: FSMContext):  # AFSMContext → FSMContext
+async def process_code(message: types.Message, state: FSMContext):
     text = message.text.strip().upper()
     user_id = message.from_user.id
 
@@ -292,7 +292,6 @@ async def process_code(message: types.Message, state: FSMContext):  # AFSMContex
         await message.answer("Kod noto‘g‘ri formatda. Masalan: `AR-9K2M4P`", parse_mode="Markdown")
         return
 
-    # Qolgan kod...
     user_res = supabase.table('users').select('id').eq('user_id', user_id).execute()
     if not user_res.data:
         await message.answer("Siz hali ro‘yxatdan o‘tmagansiz.")
