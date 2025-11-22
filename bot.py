@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -27,7 +27,7 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 MAX_CODES_PER_PHONE = 10
 
-# ================== ADMIN ID (o'zgartiring) ==================
+# ================== ADMIN ID ==================
 ADMIN_ID = 6191416030  # o'zingizning Telegram ID'ingiz
 
 # ================== STATES ==================
@@ -35,7 +35,9 @@ class RegisterStates(StatesGroup):
     waiting_name = State()
     waiting_surname = State()
     waiting_code = State()
-    waiting_broadcast = State()  # admin uchun xabar yuborish
+    waiting_broadcast = State()
+    waiting_question = State()      # YANGI
+    waiting_answer = State()        # YANGI
 
 # ================== KEYBOARDS ==================
 def get_phone_kb():
@@ -47,7 +49,10 @@ def get_phone_kb():
 
 def get_code_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")]],
+        keyboard=[
+            [KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")],
+            [KeyboardButton(text="Savol berish")]  # YANGI TUGMA
+        ],
         resize_keyboard=True
     )
 
@@ -55,7 +60,8 @@ def get_admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Obunachilarga xabar")],
-            [KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")]
+            [KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")],
+            [KeyboardButton(text="Savol berish")]
         ],
         resize_keyboard=True
     )
@@ -77,7 +83,7 @@ def calculate_chances(codes_count: int) -> int:
 @dp.message(F.contact)
 async def handle_contact(message: types.Message, state: FSMContext):
     phone = re.sub(r'\D', '', message.contact.phone_number)
-  
+ 
     if not phone.startswith('998') or len(phone) != 12:
         await message.answer(
             "Telefon raqami noto'g'ri formatda!\n"
@@ -85,10 +91,9 @@ async def handle_contact(message: types.Message, state: FSMContext):
             reply_markup=get_phone_kb()
         )
         return
-  
+ 
     phone = '+' + phone
     user_id = message.from_user.id
-
     if supabase.table('users').select('id').eq('phone', phone).execute().data:
         await message.answer(
             "Bu telefon raqami allaqachon ro'yxatdan o'tgan.\n"
@@ -96,7 +101,6 @@ async def handle_contact(message: types.Message, state: FSMContext):
             reply_markup=get_phone_kb()
         )
         return
-
     await state.update_data(phone=phone)
     await message.answer("Ismingizni kiriting:")
     await state.set_state(RegisterStates.waiting_name)
@@ -117,33 +121,31 @@ async def reject_manual_phone(message: types.Message, state: FSMContext):
 async def start_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text or ""
-
     deep_link = re.search(r'/start\s+code_([A-Z0-9-]+)', text)
     if deep_link:
         code = deep_link.group(1).upper()
         if validate_code(code):
             await state.update_data(deep_code=code)
-
     res = supabase.table('users').select('name, chances, phone').eq('user_id', user_id).execute()
-    
+   
     if res.data:
         user = res.data[0]
         data = await state.get_data()
         deep_code = data.get('deep_code')
-        
+       
         if deep_code:
             code_res = supabase.table('codes').select('assigned', 'user_id').eq('code', deep_code).execute()
-            
+           
             if code_res.data and not code_res.data[0]['assigned']:
                 used_count = supabase.table('codes').select('id', count='exact').eq('assigned', True).eq('user_id', user_id).execute().count
-                
+               
                 if used_count < MAX_CODES_PER_PHONE:
                     update_res = supabase.table('codes').update({
                         'assigned': True,
                         'user_id': user_id,
                         'assigned_at': 'now()'
                     }).eq('code', deep_code).execute()
-                    
+                   
                     if update_res.data:
                         total_codes = used_count + 1
                         chances = calculate_chances(total_codes)
@@ -151,7 +153,7 @@ async def start_handler(message: types.Message, state: FSMContext):
                             'chances': chances,
                             'purchases': total_codes
                         }).eq('user_id', user_id).execute()
-                        
+                       
                         await message.answer(
                             f"**QR-kod orqali kod qabul qilindi!**\n\n"
                             f"Kod: `{deep_code}`\n"
@@ -166,7 +168,7 @@ async def start_handler(message: types.Message, state: FSMContext):
                     await message.answer("**Maksimal 10 ta kod kiritildi!**", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
             else:
                 await message.answer(f"**Bu kod topilmadi yoki allaqachon ishlatilgan: {deep_code}**", reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb())
-        
+       
         await message.answer(
             f"👋 Salom, **{user['name']}!**\n\n"
             f"🎯 Sizda **{user['chances']} ta imkoniyat** bor.\n"
@@ -200,7 +202,6 @@ async def process_surname(message: types.Message, state: FSMContext):
     surname = message.text.strip()
     phone = data['phone']
     deep_code = data.get('deep_code')
-
     insert_res = supabase.table('users').insert({
         'user_id': user_id,
         'name': name,
@@ -209,14 +210,11 @@ async def process_surname(message: types.Message, state: FSMContext):
         'chances': 0,
         'purchases': 0
     }).execute()
-
     if not insert_res.data:
         await message.answer("Ro'yxatdan o'tishda xato. Qayta urining.")
         return
-
     if deep_code:
         code_res = supabase.table('codes').select('assigned').eq('code', deep_code).execute()
-
         if not code_res.data:
             await message.answer(
                 f"🎉 Ro‘yxatdan o‘tdingiz!\n"
@@ -242,14 +240,12 @@ async def process_surname(message: types.Message, state: FSMContext):
                 'user_id': user_id,
                 'assigned_at': 'now()'
             }).eq('code', deep_code).execute()
-
             if update_res.data:
                 chances = calculate_chances(1)
                 supabase.table('users').update({
                     'chances': chances,
                     'purchases': 1
                 }).eq('user_id', user_id).execute()
-
                 await message.answer(
                     f"🎉 Ro‘yxatdan o‘tdingiz!\n"
                     f"👤 Ismi: {name} {surname}\n"
@@ -276,7 +272,6 @@ async def process_surname(message: types.Message, state: FSMContext):
             f"Kod jo'natish uchun *Kod jo`natish* tugmasini yozing ",
             reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb()
         )
-
     await state.clear()
     await state.set_state(RegisterStates.waiting_code)
 
@@ -290,62 +285,51 @@ async def ask_code(message: types.Message):
 async def process_code(message: types.Message, state: FSMContext):
     code = message.text.strip().upper()
     user_id = message.from_user.id
-
     if code == "KODLARIM":
         await my_codes(message)
         return
-
     if code == "OBUNACHILARGA XABAR" and user_id == ADMIN_ID:
         await message.answer("Barcha obunachilarga yubormoqchi bo'lgan xabaringizni yozing:")
         await state.set_state(RegisterStates.waiting_broadcast)
         return
-
     if not validate_code(code):
         await message.answer("Kod noto‘g‘ri formatda. Masalan: `AR-9K2M4P`", parse_mode="Markdown")
         return
-
     user_res = supabase.table('users').select('id').eq('user_id', user_id).execute()
     if not user_res.data:
         await message.answer("Siz hali ro‘yxatdan o‘tmagansiz. Iltimos, avval telefon raqamingizni jo‘nating.")
         return
-
     res = supabase.table('codes').select('assigned').eq('code', code).execute()
     if not res.data:
         await message.answer(f"**Bu kod topilmadi: {code}**\nIltimos, to‘g‘ri kod kiriting.")
         return
-
     if res.data[0]['assigned']:
         await message.answer(
             f"❗️ Bu kod allaqachon ishlatilgan: {code}\n"
             "⚠️ Har bir kod faqat bir marta ishlatiladi.\n\n"
             "Agar bu sizning kodingiz bo‘lsa, murojaat qiling:\n"
-            "📞 +998 XX XXX XX XX\n"
-            "📩 @support_admin"
+            "📞 +998 99 025 00 70\n"
+            "📩 @beautygate_uz"
         )
         return
-
     used_count = supabase.table('codes').select('id', count='exact').eq('assigned', True).eq('user_id', user_id).execute().count
     if used_count >= MAX_CODES_PER_PHONE:
         await message.answer("**Maksimal 10 ta kod kiritildi!**\nBoshqa akkaunt orqali davom eting.")
         return
-
     update_res = supabase.table('codes').update({
         'assigned': True,
         'user_id': user_id,
         'assigned_at': 'now()'
     }).eq('code', code).execute()
-
     if not update_res.data:
         await message.answer("Kodni saqlashda xato. Qayta urining.")
         return
-
     total_codes = used_count + 1
     chances = calculate_chances(total_codes)
     supabase.table('users').update({
         'chances': chances,
         'purchases': total_codes
     }).eq('user_id', user_id).execute()
-
     await message.answer(
         f"**🎉 Yangi kod qabul qilindi!**\n"
         f"💎 Kod: `{code}`\n"
@@ -361,21 +345,17 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         await message.answer("Sizda bu huquq yo'q.")
         return
-
     broadcast_text = message.text
     users = supabase.table('users').select('user_id').execute().data
-
     success = 0
     failed = 0
-
     for user in users:
         try:
             await bot.send_message(chat_id=user['user_id'], text=broadcast_text)
             success += 1
         except:
             failed += 1
-        await asyncio.sleep(0.05)  # Telegram limitdan o'tish
-
+        await asyncio.sleep(0.05)
     await message.answer(
         f"Xabar yuborildi!\n"
         f"Muvaffaqiyatli: {success}\n"
@@ -391,14 +371,11 @@ async def my_codes(message: types.Message):
     if not res.data:
         await message.answer("Siz hali ro‘yxatdan o‘tmagansiz.")
         return
-
     user = res.data[0]
     current_codes = user['purchases']
     current_chances = user['chances']
-
     codes_res = supabase.table('codes').select('code').eq('assigned', True).eq('user_id', user_id).execute()
     code_list = "\n".join([f"• `{c['code']}`" for c in codes_res.data]) if codes_res.data else "Hali kod kiritilmagan."
-
     next_milestone = ""
     if current_codes < 1:
         next_milestone = "Birinchi kodni kiriting → 1 ta imkoniyat!"
@@ -410,14 +387,12 @@ async def my_codes(message: types.Message):
         next_milestone = f"**100 ta imkoniyat** uchun **{needed} ta kod** kerak."
     else:
         next_milestone = "Maksimal imkoniyatga erishdingiz!"
-
     chances_explanation = (
         "**Imkoniyatlar hisobi:**\n"
         "• 1–2 ta kod → **1 taimkoniyat**\n"
         "• 3–9 ta kod → **10 ta imkoniyat**\n"
         "• 10 ta kod → **100 ta imkoniyat**"
     )
-
     await message.answer(
         f"**💫 SIZNING HISOBINGIZ 💫**\n\n"
         f"**👤 Ismi:** {user['name']}\n"
@@ -430,6 +405,76 @@ async def my_codes(message: types.Message):
         reply_markup=get_admin_kb() if user_id == ADMIN_ID else get_code_kb(),
         parse_mode="Markdown"
     )
+
+# ================== YANGI: SAVOL BERISH ==================
+@dp.message(F.text == "Savol berish")
+async def ask_question(message: types.Message, state: FSMContext):
+    await message.answer(
+        "Savolingizni yozing, tez orada javob beramiz!",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(RegisterStates.waiting_question)
+
+@dp.message(RegisterStates.waiting_question)
+async def receive_question(message: types.Message, state: FSMContext):
+    user = message.from_user
+    question = message.text.strip()
+
+    # Admin ga yuborish
+    await bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"**Yangi savol!**\n\n"
+            f"👤 Foydalanuvchi: {user.full_name}\n"
+            f"@{user.username if user.username else 'yo‘q'}\n"
+            f"🆔 ID: <code>{user.id}</code>\n\n"
+            f"❓ Savol:\n{question}"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Javob berish", callback_data=f"answer_{user.id}")]
+        ])
+    )
+
+    await message.answer(
+        "Rahmat! Savolingiz qabul qilindi. Tez orada javob beramiz!",
+        reply_markup=get_admin_kb() if user.id == ADMIN_ID else get_code_kb()
+    )
+    await state.clear()
+
+# Admin "Javob berish" tugmasini bosganda
+@dp.callback_query(lambda c: c.data and c.data.startswith("answer_"))
+async def start_answer(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Sizda bu huquq yo‘q!", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[1])
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Javobingizni yozing:")
+    await state.set_state(RegisterStates.waiting_answer)
+    await state.update_data(target_user_id=user_id)
+
+# Admin javob yozganda — foydalanuvchiga yuboriladi
+@dp.message(RegisterStates.waiting_answer)
+async def send_answer(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+    answer = message.text
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=f"**Javob:**\n\n{answer}"
+        )
+        await message.answer("Javob yuborildi!")
+    except Exception as e:
+        await message.answer(f"Javob yuborib bo‘lmadi (foydalanuvchi bloklagan bo‘lishi mumkin).\nXato: {e}")
+
+    await state.clear()
 
 # ================== MAIN ==================
 async def main():
