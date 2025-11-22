@@ -60,6 +60,7 @@ def get_admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Obunachilarga xabar")],
+            [KeyboardButton(text="Statistika")],  # YANGI TUGMA
             [KeyboardButton(text="Kod jo'natish"), KeyboardButton(text="Kodlarim")],
             [KeyboardButton(text="Savol berish")]
         ],
@@ -183,14 +184,14 @@ async def process_surname(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(RegisterStates.waiting_code)
 
-# ================== 1. KOD JO'NATISH ==================
+# ================== KOD JO'NATISH ==================
 @dp.message(F.text == "Kod jo'natish")
 async def ask_code(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
         return
     await message.answer("Kod jo'nating (masalan: `AR-9K2M4P`):", parse_mode="Markdown")
 
-# ================== 2. KODLARIM ==================
+# ================== KODLARIM ==================
 @dp.message(F.text == "Kodlarim")
 async def my_codes(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
@@ -226,7 +227,7 @@ async def my_codes(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ================== 3. SAVOL BERISH ==================
+# ================== SAVOL BERISH (TO‘G‘RI!) ==================
 @dp.message(F.text == "Savol berish")
 async def ask_question(message: types.Message, state: FSMContext):
     if await state.get_state() != RegisterStates.waiting_code:
@@ -247,7 +248,7 @@ async def receive_question(message: types.Message, state: FSMContext):
     )
 
     await message.answer("Rahmat! Savolingiz qabul qilindi. Tez orada javob beramiz!", reply_markup=get_admin_kb() if user.id == ADMIN_ID else get_code_kb())
-    await state.clear()
+    await state.clear()  # MUHIM: state o‘chiriladi → Kod jo‘natish qayta ishlaydi!
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("answer_"))
 async def start_answer(callback: types.CallbackQuery, state: FSMContext):
@@ -273,14 +274,33 @@ async def send_answer(message: types.Message, state: FSMContext):
         await message.answer(f"Javob yuborilmadi: {e}")
     await state.clear()
 
-# ================== 4. KOD QAYTA ISHLOVCHI (EN OXIRGI!) ==================
+# ================== ADMIN STATISTIKA ==================
+@dp.message(F.text == "Statistika")
+async def admin_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Sizda bu huquq yo'q.")
+        return
+
+    total_users = supabase.table('users').select('user_id', count='exact').execute().count
+    total_codes = supabase.table('codes').select('id', count='exact').eq('assigned', True).execute().count
+    total_chances = supabase.table('users').select('chances').execute().data
+    total_chances_sum = sum(user['chances'] for user in total_chances) if total_chances else 0
+
+    await message.answer(
+        f"STATISTIKA\n\n"
+        f"Obunachilar: {total_users} ta\n"
+        f"Jami kiritilgan kodlar: {total_codes} ta\n"
+        f"Jami imkoniyatlar: {total_chances_sum} ta",
+        reply_markup=get_admin_kb()
+    )
+
+# ================== KOD QAYTA ISHLOVCHI (EN OXIRGI!) ==================
 @dp.message(RegisterStates.waiting_code)
 async def process_code(message: types.Message, state: FSMContext):
     text = message.text.strip().upper()
     user_id = message.from_user.id
 
-    # Tugmalarni oldindan ushlab oldik
-    if text in ["KOD JO'NATISH", "KODLARIM", "SAVOL BERISH"]:
+    if text in ["KOD JO'NATISH", "KODLARIM", "SAVOL BERISH", "STATISTIKA"]:
         return
 
     if text == "OBUNACHILARGA XABAR" and user_id == ADMIN_ID:
